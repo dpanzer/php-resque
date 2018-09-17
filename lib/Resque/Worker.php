@@ -192,7 +192,9 @@ class Resque_Worker
 			Resque_Event::trigger('beforeFork', $job);
 			$this->workingOn($job);
 
-			$this->child = Resque::fork();
+			//never fork child processes
+			//$this->child = Resque::fork();
+			$this->child = false;
 
 			// Forked and we're the child. Run the job.
 			if ($this->child === 0 || $this->child === false) {
@@ -200,13 +202,12 @@ class Resque_Worker
 				$this->updateProcLine($status);
 				$this->logger->log(Psr\Log\LogLevel::INFO, $status);
 				$this->perform($job);
-				if ($this->child === 0) {
-					exit(0);
-				}
+				$this->doneWorking();
 			}
 
 			if($this->child > 0) {
 				// Parent process, sit and wait
+				$job = null; // we forget the job, because it might change
 				$status = 'Forked ' . $this->child . ' at ' . strftime('%F %T');
 				$this->updateProcLine($status);
 				$this->logger->log(Psr\Log\LogLevel::INFO, $status);
@@ -215,18 +216,32 @@ class Resque_Worker
 				pcntl_wait($status);
 				$exitStatus = pcntl_wexitstatus($status);
 				if($exitStatus !== 0) {
-					$job->fail(new Resque_Job_DirtyExitException(
-						'Job exited with exit code ' . $exitStatus
-					));
+					$this->fail($exitStatus);
+                    $this->doneWorking();
 				}
+
+				$this->child = null;
 			}
 
-			$this->child = null;
-			$this->doneWorking();
 		}
 
 		$this->unregisterWorker();
 	}
+
+	 /**
+     * Fail the current job
+     * 
+     * @param int $exitStatus the exit code
+     */
+    private function fail($exitStatus)
+    {
+        // error, grab the job from redis and fail it
+        $jobData = Resque::redis()->get('worker:' . (string)$this);
+        $job = new Resque_Job($jobData['queue'], $jobData['payload']);
+        $job->fail(new Resque_Job_DirtyExitException(
+            'Job exited with exit code ' . $exitStatus
+        ));
+     }
 
 	/**
 	 * Process a single job.
